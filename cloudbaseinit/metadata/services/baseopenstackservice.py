@@ -48,12 +48,18 @@ class BaseOpenStackService(base.BaseMetadataService):
             posixpath.join('openstack', 'latest', 'user_data'))
         return self._get_cache_data(path)
 
-    def _get_meta_data(self, version='latest'):
+    def _get_generic_data(self, name, version='latest'):
         path = posixpath.normpath(
-            posixpath.join('openstack', version, 'meta_data.json'))
+            posixpath.join('openstack', version, name))
         data = self._get_cache_data(path, decode=True)
         if data:
             return json.loads(data)
+
+    def _get_meta_data(self):
+        return self._get_generic_data('meta_data.json')
+
+    def _get_network_data(self):
+        return self._get_generic_data('network_data.json')
 
     def get_instance_id(self):
         return self._get_meta_data().get('uuid')
@@ -76,6 +82,47 @@ class BaseOpenStackService(base.BaseMetadataService):
         return list(set((key.strip() for key in public_keys)))
 
     def get_network_details(self):
+        # Try retrieving and parsing the network data JSON.
+        try:
+            network_data = self._get_network_data()
+        except base.NotExistingMetadataException:
+            LOG.debug("Network data in JSON format not found; "
+                      "fallback to network_config.")
+        else:
+            if network_data:
+                # Collect DNS name servers.
+                dns_servers = []
+                for service in network_data["services"]:
+                    if service["type"] == "dns":
+                        dns_servers.append(service["address"])
+                # Extract basic details by links over networks.
+                links = {}
+                for link in network_data["links"]:
+                    links[link["id"]] = link
+                networks = {}
+                for network in network_data["networks"]:
+                    networks[network["link"]] = network
+
+                nics = []
+                for link_id, link in links.items():
+                    if link["type"] in ("vif", "phy", "ovs"):
+                        network = networks[link_id]
+                        suffix = "6" if network["type"] == "ipv6" else ""
+                        nic = dict.fromkeys(base.FIELDS)
+                        nic["dnsnameservers"] = dns_servers
+                        nic["name"] = network["id"]
+                        nic["mac"] = link["ethernet_mac_address"].upper()
+                        address = network["ip_address"]
+                        if suffix:
+                            pass
+                        else:
+                            nic["address"] = address
+                            nic["netmask"] = network["netmask"]
+                        nics.append(base.NetworkDetails(**nic))
+
+                return nics
+
+        # Parse the Debian-like network configuration content.
         network_config = self._get_meta_data().get('network_config')
         if not network_config:
             return None
